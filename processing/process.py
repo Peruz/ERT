@@ -16,9 +16,68 @@ else:
     numba_opt = True
 
 
+class PathType(object):
+    def __init__(self, exists=True, type='file', dash_ok=True):
+        '''exists:
+                True: a path that does exist
+                False: a path that does not exist, in a valid parent directory
+                None: don't care
+           type: file, dir, symlink, None, or a function returning True for valid paths
+                None: don't care
+           dash_ok: whether to allow "-" as stdin/stdout'''
+
+        assert exists in (True, False, None)
+        assert type in ('file', 'dir', 'symlink', None) or hasattr(type, '__call__')
+
+        self._exists = exists
+        self._type = type
+        self._dash_ok = dash_ok
+
+    def __call__(self, string):
+        if string == '-':
+            # the special argument "-" means sys.std{in,out}
+            if self._type == 'dir':
+                raise argparse.ArgumentError('standard input/output (-) not allowed as directory path')
+            elif self._type == 'symlink':
+                raise err('standard input/output (-) not allowed as symlink path')
+            elif not self._dash_ok:
+                raise err('standard input/output (-) not allowed')
+        else:
+            e = os.path.exists(string)
+            if self._exists is True:
+                if not e:
+                    raise argparse.ArgumentError("path does not exist: '%s'" % string)
+                if self._type is None:
+                    pass
+                elif self._type == 'file':
+                    if not os.path.isfile(string):
+                        raise argparse.ArgumentError("path is not a file: '%s'" % string)
+                elif self._type == 'symlink':
+                    if not os.path.symlink(string):
+                        raise argparse.ArgumentError("path is not a symlink: '%s'" % string)
+                elif self._type == 'dir':
+                    if not os.path.isdir(string):
+                        raise argparse.ArgumentError("path is not a directory: '%s'" % string)
+                elif not self._type(string):
+                    raise argparse.ArgumentError("path not valid: '%s'" % string)
+            else:
+                if self._exists is False and e:
+                    raise argparse.ArgumentError("path exists: '%s'" % string)
+
+                p = os.path.dirname(os.path.normpath(string)) or '.'
+                if not os.path.isdir(p):
+                    raise argparse.ArgumentError("parent path is not a directory: '%s'" % p)
+                elif not os.path.exists(p):
+                    raise argparse.ArgumentError("parent directory does not exist: '%s'" % p)
+        return(string)
+
+
 def get_cmd():
     """ get command line arguments for data processing
     """
+
+    pathtype = PathType(exists=True, type='file')
+
     parse = argparse.ArgumentParser()
 
     mains = parse.add_argument_group('mains')
@@ -27,7 +86,7 @@ def get_cmd():
     outputs = parse.add_argument_group('output')
 
     # MAIN
-    mains.add_argument('fName', type=str, help='Data file to process')
+    mains.add_argument('-fName', type=str, help='Data file to process')
     mains.add_argument('-fExtension', type=str, help='Data file extension', default='.Data')
     mains.add_argument('-fType', type=str, help='Instrument', default='labrecque')
     mains.add_argument('-plot', dest='plot', action='store_true', help='plot information on data filtering')
@@ -48,8 +107,7 @@ def get_cmd():
     # rhoa and k
     filters.add_argument('-k', dest='k', action='store_true', help='perform geometric factor check')
     filters.add_argument('-k_max', dest='k_max', type=float, help='maximum geometric factor', default=500)
-    filters.add_argument('-k_dir', type=str, default='geom_factors', help='directory with geometrical factor files')
-    filters.add_argument('-k_file', type=str, default='hotbent_long.data', help='file containing the geometrical factors')  # fromat a b m n r k ...
+    filters.add_argument('-k_file', type=pathtype, help='file containing the geometrical factors')  # fromat a b m n r k ...
     filters.add_argument('-rhoa', dest='rhoa', action='store_true', help='perform rhoa check')
     filters.add_argument('-rhoa_min', type=float, default=2, help='min rhoa value')
     filters.add_argument('-rhoa_max', type=float, default=500, help='max rhoa value')
@@ -93,7 +151,7 @@ def check_cmd(args):
 def find_files(extension):
     """ find all Data files if all the files in the directory have to be processed"""
     print('-' * 80)
-    print('Looking for all data files with extension: ', self.all_files)
+    print('Looking for all data files with extension: ', extension)
     all_files = [f for f in os.listdir() if f.endswith(extension)]
     print('Data files found are: ', all_files)
     return(all_files)
@@ -141,10 +199,10 @@ def read_labrecque(FileName=None):
                 print('Apperent Resisitivity column was found')
                 AppRes = True
             elif 'FStcks' in line:
-                print('data file in Frequency Domain')
+                print('Data file in Frequency Domain')
                 FreDom = True
             elif 'TStcks' in line:
-                print('data file in Time Domain')
+                print('Data file in Time Domain')
                 FreDom = False
 
         elec_lines = [i for i in range(first_elec, last_elec)]
@@ -189,22 +247,18 @@ def read_labrecque(FileName=None):
     return(elecdf, datadf)
 
 
-def read_bert(filepath=None, k_dir=None, k_file=None):
+def read_bert(k_file=None):
     reex = r'[-+]?[.]?[\d]+[\.]?\d*(?:[eE][-+]?\d+)?'
 
-    if filepath is None:
-        process_dir = os.path.dirname(__file__)
-        filepath = os.path.join(process_dir, k_dir, k_file)
-
-    with open(filepath) as fid:
+    with open(k_file) as fid:
         lines = fid.readlines()
     elec_num = int(lines[0])
     data_num = int(lines[elec_num + 2])
 
-    elec_raw = pd.read_csv(filepath, delim_whitespace=True, skiprows=1, nrows=elec_num, header=None)
+    elec_raw = pd.read_csv(k_file, delim_whitespace=True, skiprows=1, nrows=elec_num, header=None)
     elec = elec_raw[elec_raw.columns[:-1]]
     elec.columns = elec_raw.columns[1:]
-    data_raw = pd.read_csv(filepath, delim_whitespace=True, skiprows=elec_num + 3, nrows=data_num)
+    data_raw = pd.read_csv(k_file, delim_whitespace=True, skiprows=elec_num + 3, nrows=data_num)
     data = data_raw[data_raw.columns[:-1]]
     data.columns = data_raw.columns[1:]
     return(elec, data)
@@ -347,7 +401,7 @@ class ERTdataset():
         colors_validity = {1: 'b', 0: 'r'}
         labels_validity = {1: 'Valid', 0: 'Invalid'}
         groupby_df = self.data.groupby(self.data['valid'])
-        for key in groupby_df.groups.keys():
+        for key in groupby_df.groups.keys():  # for group 1 (valid) and group 0 (invalid)
             meas = groupby_df.get_group(key)['meas'].to_numpy(dtype=int)
             for c in plot_columns:
                 fig_name = fname + labels_validity[key] + '_' + c + '.png'
@@ -358,15 +412,26 @@ class ERTdataset():
                 plt.savefig(fig_name)
                 plt.close()
 
+    def report(self, report_columns=['ctc_valid', 'stk_valid', 'v_valid', 'rec_valid', 'k_valid', 'rhoa_valid', 'valid']):
+        for c in report_columns:
+            print('-----\n', self.data[c].value_counts())
 
-def main():
-    """ basic processing app
-    ---
-     for more specific needs use the above class and funcitons in new command-line app
+
+def get_options(args_dict: dict):
+    """ get options from command-line, update with function args_dict if needed, then check consistency
     """
-    # get and check comman-line
     args = get_cmd()
+    for key, val in args_dict.items():
+        if not hasattr(args, key):
+            raise AttributeError('unrecognized option: ', key)
+        else:
+            setattr(args, key, val)
     args = check_cmd(args)
+    return(args)
+
+
+def process(args):
+    """ process one or more ERT files """
     # get file(s) to process
     if args.fName == 'all':
         all_files = find_files(args.fExtension)
@@ -374,6 +439,7 @@ def main():
         all_files = [args.fName]
     # read file(s)
     for file in all_files:
+        args.fName = file
         if args.fType == 'labrecque':
             elec, data = read_labrecque(file)
         # pass to ERTdataset class
@@ -398,7 +464,7 @@ def main():
         if args.volt:
             ds.data['v_valid'] = ds.data['v'] > args.v_min
         if (args.k or args.rhoa):  # get k if either k or rhoa are True
-            elec_kfile, data_kfile = read_bert(k_dir=args.k_dir, k_file=args.k_file)
+            elec_kfile, data_kfile = read_bert(k_file=args.k_file)
             ds.get_k(data_kfile)
         if args.k:
             ds.data['k_valid'] = ds.data['k'].abs() < args.k_max
@@ -407,14 +473,22 @@ def main():
             ds.data['rhoa_valid'] = ds.data['rhoa'].between(args.rhoa_min, args.rhoa_max)
         # combine filters
         ds.data['valid'] = ds.data[['rec_valid', 'k_valid', 'rhoa_valid', 'v_valid', 'ctc_valid', 'stk_valid']].all(axis='columns')
-        ds.data.to_csv('data_processed.csv')  # dump all data
+        output_fname = output_files(args.fName, extension='.csv')
+        ds.data.to_csv(output_fname)  # dump all data
         # combine rec for lighter output and inversion
         ds.couple_rec(couple=args.rec_couple, keep_unpaired=args.rec_keep_unpaired)
         # output
-        output_fname = output_files(args.fName)
+        output_fname = output_files(args.fName, extension='.dat')
         ds.to_bert(output_fname, wrt_rhoa=args.wrt_rhoa, wrt_ip=args.wrt_ip)
+        ds.report()
         # plot
         if args.plot:
             ds.plot(args.fName)
+
+
+def main_process(**kargs):
+    args = get_options(args_dict=kargs)
+    process(args)
+
 if __name__ == '__main__':
-    main()
+    main_process()
