@@ -5,8 +5,7 @@ import pandas as pd
 import numpy as np
 import warnings
 import matplotlib.pyplot as plt
-import time
-
+import itertools
 
 try:
     from numba import jit, prange
@@ -16,68 +15,9 @@ else:
     numba_opt = True
 
 
-class PathType(object):
-    def __init__(self, exists=True, type='file', dash_ok=True):
-        '''exists:
-                True: a path that does exist
-                False: a path that does not exist, in a valid parent directory
-                None: don't care
-           type: file, dir, symlink, None, or a function returning True for valid paths
-                None: don't care
-           dash_ok: whether to allow "-" as stdin/stdout'''
-
-        assert exists in (True, False, None)
-        assert type in ('file', 'dir', 'symlink', None) or hasattr(type, '__call__')
-
-        self._exists = exists
-        self._type = type
-        self._dash_ok = dash_ok
-
-    def __call__(self, string):
-        if string == '-':
-            # the special argument "-" means sys.std{in,out}
-            if self._type == 'dir':
-                raise argparse.ArgumentError('standard input/output (-) not allowed as directory path')
-            elif self._type == 'symlink':
-                raise err('standard input/output (-) not allowed as symlink path')
-            elif not self._dash_ok:
-                raise err('standard input/output (-) not allowed')
-        else:
-            e = os.path.exists(string)
-            if self._exists is True:
-                if not e:
-                    raise argparse.ArgumentError("path does not exist: '%s'" % string)
-                if self._type is None:
-                    pass
-                elif self._type == 'file':
-                    if not os.path.isfile(string):
-                        raise argparse.ArgumentError("path is not a file: '%s'" % string)
-                elif self._type == 'symlink':
-                    if not os.path.symlink(string):
-                        raise argparse.ArgumentError("path is not a symlink: '%s'" % string)
-                elif self._type == 'dir':
-                    if not os.path.isdir(string):
-                        raise argparse.ArgumentError("path is not a directory: '%s'" % string)
-                elif not self._type(string):
-                    raise argparse.ArgumentError("path not valid: '%s'" % string)
-            else:
-                if self._exists is False and e:
-                    raise argparse.ArgumentError("path exists: '%s'" % string)
-
-                p = os.path.dirname(os.path.normpath(string)) or '.'
-                if not os.path.isdir(p):
-                    raise argparse.ArgumentError("parent path is not a directory: '%s'" % p)
-                elif not os.path.exists(p):
-                    raise argparse.ArgumentError("parent directory does not exist: '%s'" % p)
-        return(string)
-
-
 def get_cmd():
     """ get command line arguments for data processing
     """
-
-    pathtype = PathType(exists=True, type='file')
-
     parse = argparse.ArgumentParser()
 
     mains = parse.add_argument_group('mains')
@@ -86,10 +26,11 @@ def get_cmd():
     outputs = parse.add_argument_group('output')
 
     # MAIN
-    mains.add_argument('-fName', type=str, help='Data file to process')
+    mains.add_argument('-fName', type=str, help='Data file to process', nargs='+')
     mains.add_argument('-fExtension', type=str, help='Data file extension', default='.Data')
     mains.add_argument('-fType', type=str, help='Instrument', default='labrecque')
     mains.add_argument('-plot', dest='plot', action='store_true', help='plot information on data filtering')
+    mains.add_argument('-elec_coordinates', type=str, help='file with electrode coordinates: x y z columns')
 
     # FILTERS
     # voltage
@@ -107,7 +48,7 @@ def get_cmd():
     # rhoa and k
     filters.add_argument('-k', dest='k', action='store_true', help='perform geometric factor check')
     filters.add_argument('-k_max', dest='k_max', type=float, help='maximum geometric factor', default=500)
-    filters.add_argument('-k_file', type=pathtype, help='file containing the geometrical factors')  # fromat a b m n r k ...
+    filters.add_argument('-k_file', type=str, help='file containing the geometrical factors')  # fromat a b m n r k ...
     filters.add_argument('-rhoa', dest='rhoa', action='store_true', help='perform rhoa check')
     filters.add_argument('-rhoa_min', type=float, default=2, help='min rhoa value')
     filters.add_argument('-rhoa_max', type=float, default=500, help='max rhoa value')
@@ -148,15 +89,6 @@ def check_cmd(args):
     return(args)
 
 
-def find_files(extension):
-    """ find all Data files if all the files in the directory have to be processed"""
-    print('-' * 80)
-    print('Looking for all data files with extension: ', extension)
-    all_files = [f for f in os.listdir() if f.endswith(extension)]
-    print('Data files found are: ', all_files)
-    return(all_files)
-
-
 def output_files(fname, extension='.dat'):
     """define names for the output file and clean them if already exist"""
     fname_noExtension = os.path.splitext(fname)[0]
@@ -176,49 +108,29 @@ def read_labrecque(FileName=None):
 
     reex = r'[-+]?[.]?[\d]+[\.]?\d*(?:[eE][-+]?\d+)?'
 
-    # init lists to store the numbers of rows for data, elec, and to skip (invalid data)
-    ElecAllColumns, DataAllColumns, lines2skip = [], [], []
+    ElecAllColumns, DataAllColumns = [], []
     AppRes = False
-    # read file to fill lists of data and elec rows, also look for invalid data and data format (AppRes and FreDom)
+
     with open(FileName) as fid:
-        for i, line in enumerate(fid):
-            # check electrode rows
-            if '#elec_start' in line:
-                first_elec = i + 2
-            elif '#elec_end' in line:
-                last_elec = i
-            # check data rows
-            elif '#data_start' in line:
-                first_data = i + 3
-            elif '#data_end' in line:
-                last_data = i
-            elif 'TX Resist. out of range' in line:
-                lines2skip.append(i)
-            # check formats
-            elif 'Appres' in line:
+        for l in fid:
+            if '!Cbl# El#' in l:
+                for l in itertools.takewhile(lambda x: '#elec_end' not in x, fid):
+                    ElecAllColumns.append(re.findall(reex, l))
+            elif '! num   Ca El' in l:
+                for l in itertools.takewhile(lambda x: '#data_end' not in x, fid):
+                    if 'TX Resist. out of range' in l:
+                        print('!!! TX Resist. out of range, data num:    ', re.findall(reex, l))
+                    else:
+                        DataAllColumns.append(re.findall(reex, l))
+            elif 'Appres' in l:
                 print('Apperent Resisitivity column was found')
                 AppRes = True
-            elif 'FStcks' in line:
+            elif 'FStcks' in l:
                 print('Data file in Frequency Domain')
                 FreDom = True
-            elif 'TStcks' in line:
+            elif 'TStcks' in l:
                 print('Data file in Time Domain')
                 FreDom = False
-
-        elec_lines = [i for i in range(first_elec, last_elec)]
-        data_lines = [i for i in range(first_data, last_data) if i not in lines2skip]
-
-        # go back to the top of the file, to read again, extracting electrodes and data
-        fid.seek(0)
-
-        # read electrode and data
-        for i, line in enumerate(fid):
-            if i in elec_lines:
-                nums = re.findall(reex, line)
-                ElecAllColumns.append(nums)
-            elif i in data_lines:
-                nums = re.findall(reex, line)
-                DataAllColumns.append(nums)
 
     # data
     ap = int(AppRes)
@@ -239,10 +151,6 @@ def read_labrecque(FileName=None):
 
     if not FreDom:
         datadf['ip'] = None
-
-    # report invalid lines if present
-    if not lines2skip == []:
-        print('\n!!! number of invalid data rows (TX Resis. out of range): ', len(lines2skip), '\n    see Data file, continuing with valid data...')
 
     return(elecdf, datadf)
 
@@ -418,7 +326,7 @@ class ERTdataset():
 
 
 def get_options(args_dict: dict):
-    """ get options from command-line, update with function args_dict if needed, then check consistency
+    """ get options from command-l, update with function args_dict if needed, then check consistency
     """
     args = get_cmd()
     for key, val in args_dict.items():
@@ -432,13 +340,8 @@ def get_options(args_dict: dict):
 
 def process(args):
     """ process one or more ERT files """
-    # get file(s) to process
-    if args.fName == 'all':
-        all_files = find_files(args.fExtension)
-    else:
-        all_files = [args.fName]
     # read file(s)
-    for file in all_files:
+    for file in args.fName:
         args.fName = file
         if args.fType == 'labrecque':
             elec, data = read_labrecque(file)
@@ -451,6 +354,8 @@ def process(args):
             ds.data['meas'] += args.shift_meas
         if args.shift_elec is not None:
             ds.elec['num'] += args.shift_elec
+        if args.elec_coordinates is not None:
+            ds.elec = pd.read_csv(args.elec_coordinates, delim_whitespace=True)
         # filters
         if args.rec:
             ds.process_rec()
