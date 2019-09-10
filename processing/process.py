@@ -27,7 +27,6 @@ def get_cmd():
 
     # MAIN
     mains.add_argument('-fName', type=str, help='Data file to process', nargs='+')
-    mains.add_argument('-fExtension', type=str, help='Data file extension', default='.Data')
     mains.add_argument('-fType', type=str, help='Instrument', default='labrecque')
     mains.add_argument('-plot', dest='plot', action='store_true', help='plot information on data filtering')
     mains.add_argument('-elec_coordinates', type=str, help='file with electrode coordinates: x y z columns')
@@ -110,19 +109,9 @@ def read_labrecque(FileName=None):
 
     ElecAllColumns, DataAllColumns = [], []
     AppRes = False
-
     with open(FileName) as fid:
-        for l in fid:
-            if '!Cbl# El#' in l:
-                for l in itertools.takewhile(lambda x: '#elec_end' not in x, fid):
-                    ElecAllColumns.append(re.findall(reex, l))
-            elif '! num   Ca El' in l:
-                for l in itertools.takewhile(lambda x: '#data_end' not in x, fid):
-                    if 'TX Resist. out of range' in l:
-                        print('!!! TX Resist. out of range, data num:    ', re.findall(reex, l))
-                    else:
-                        DataAllColumns.append(re.findall(reex, l))
-            elif 'Appres' in l:
+        for l in itertools.takewhile(lambda x: 'elec_start' not in x, fid):
+            if 'Appres' in l:
                 print('Apperent Resisitivity column was found')
                 AppRes = True
             elif 'FStcks' in l:
@@ -131,7 +120,13 @@ def read_labrecque(FileName=None):
             elif 'TStcks' in l:
                 print('Data file in Time Domain')
                 FreDom = False
-
+        for l in itertools.takewhile(lambda x: 'elec_end' not in x, itertools.islice(fid, 1, None)):
+            ElecAllColumns.append(re.findall(reex, l))
+        for l in itertools.takewhile(lambda x: 'data_end' not in x, itertools.islice(itertools.dropwhile(lambda x: 'data_start' not in x, fid), 3, None)):
+            if 'TX Resist. out of range' in l:
+                print('!!! TX Resist. out of range, data num:    ', re.findall(reex, l))
+            else:
+                DataAllColumns.append(re.findall(reex, l))
     # data
     ap = int(AppRes)
     fd = int(FreDom)
