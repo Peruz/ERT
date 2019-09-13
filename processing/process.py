@@ -14,6 +14,7 @@ except ImportError:
 else:
     numba_opt = True
 
+numba_opt = False
 
 def get_cmd():
     """ get command line arguments for data processing
@@ -73,6 +74,8 @@ def get_cmd():
 
 def check_cmd(args):
     """ make sure cmd arguments agree """
+    
+    print('\n', '-' * 80)
 
     if args.wrt_rhoa and not args.rhoa:
         raise ValueError('the calculation of rhoa is necessary to add it as a column in the output file, see args.rhoa and args.wrt_rhoa')
@@ -102,7 +105,6 @@ def output_files(fname, extension='.dat'):
 def read_labrecque(FileName=None):
     """ read a labrecque data file an return data and electrode dataframes"""
 
-    print('-' * 80)
     print('reading ', FileName)
 
     reex = r'[-+]?[.]?[\d]+[\.]?\d*(?:[eE][-+]?\d+)?'
@@ -151,7 +153,6 @@ def read_labrecque(FileName=None):
 
 
 def read_bert(k_file=None):
-    reex = r'[-+]?[.]?[\d]+[\.]?\d*(?:[eE][-+]?\d+)?'
 
     with open(k_file) as fid:
         lines = fid.readlines()
@@ -270,8 +271,8 @@ class ERTdataset():
             raise IndexError('len k < len data, make sure the right k file is used')
         elif len(self.data) < len(data_k):
             warnings.warn('len k != len data; make sure the right k file is used', category=UserWarning)
-            data_k_dtype = {key: self.data_dtypes[key] for key in data_k.columns if key in ['a', 'b', 'm', 'n', 'k']}
-            right = data_k[['a', 'b', 'm', 'n', 'k']].astype(data_k_dtype)
+            # data_k_dtype = {key: self.data_dtypes[key] for key in data_k.columns if key in ['a', 'b', 'm', 'n', 'k']}
+            # right = data_k[['a', 'b', 'm', 'n', 'k']].astype(data_k_dtype)
             self.data = self.data.merge(data_k[['a', 'b', 'm', 'n', 'k']], on=['a', 'b', 'm', 'n'], how='left', suffixes=('', '_k'), copy=False)
             self.data['k'] = self.data['k_k']
             self.data.drop(columns='k_k', inplace=True)
@@ -285,7 +286,8 @@ class ERTdataset():
         elif(couple and not keep_unpaired):
             self.data = groupby_df.get_group(dir_mark)
 
-    def to_bert(self, fname, wrt_rhoa, wrt_ip, data_columns=['a', 'b', 'm', 'n', 'r'], elec_columns=['x', 'y', 'z']):
+    def to_bert(self, fname, wrt_rhoa, wrt_ip, data_columns, elec_columns):
+        print(data_columns)
         if wrt_rhoa:
             data_columns.append('rhoa')
         if wrt_ip:
@@ -300,7 +302,7 @@ class ERTdataset():
             file_handle.write('# ' + ' '.join(data_columns) + '\n')
             self.data[self.data.valid == 1][data_columns].to_csv(file_handle, sep=' ', index=None, line_terminator='\n', header=False)
 
-    def plot(self, fname, plot_columns=['ctc', 'stk', 'v', 'rec_err', 'k', 'rhoa'], valid_column='valid'):
+    def plot(self, fname, plot_columns, valid_column='valid'):
         colors_validity = {1: 'b', 0: 'r'}
         labels_validity = {1: 'Valid', 0: 'Invalid'}
         groupby_df = self.data.groupby(self.data['valid'])
@@ -333,62 +335,66 @@ def get_options(args_dict: dict):
     return(args)
 
 
-def process(args):
-    """ process one or more ERT files """
-    # read file(s)
-    for file in args.fName:
-        args.fName = file
-        if args.fType == 'labrecque':
-            elec, data = read_labrecque(file)
-        # pass to ERTdataset class
-        ds = ERTdataset(data=data, elec=elec)
-        # adjust
-        if args.shift_abmn is not None:
-            ds.data[['a', 'b', 'm', 'n']] += args.shift_abmn
-        if args.shift_meas is not None:
-            ds.data['meas'] += args.shift_meas
-        if args.shift_elec is not None:
-            ds.elec['num'] += args.shift_elec
-        if args.elec_coordinates is not None:
-            ds.elec = pd.read_csv(args.elec_coordinates, delim_whitespace=True)
-        # filters
-        if args.rec:
-            ds.process_rec()
-            if any(ds.data['ip']):
-                ds.process_rec(x='ip', x_avg='rec_ip_avg', x_err='rec_ip_err')
-            ds.data['rec_valid'] = ds.data['rec_err'] < args.rec_max
-        if args.ctc:
-            ds.data['ctc_valid'] = ds.data['ctc'] < args.ctc_max
-        if args.stk:
-            ds.data['stk_valid'] = ds.data['stk'] < args.stk_max
-        if args.volt:
-            ds.data['v_valid'] = ds.data['v'] > args.v_min
-        if (args.k or args.rhoa):  # get k if either k or rhoa are True
-            elec_kfile, data_kfile = read_bert(k_file=args.k_file)
-            ds.get_k(data_kfile)
-        if args.k:
-            ds.data['k_valid'] = ds.data['k'].abs() < args.k_max
-        if args.rhoa:
-            ds.data['rhoa'] = ds.data['r'] * ds.data['k']
-            ds.data['rhoa_valid'] = ds.data['rhoa'].between(args.rhoa_min, args.rhoa_max)
-        # combine filters
-        ds.data['valid'] = ds.data[['rec_valid', 'k_valid', 'rhoa_valid', 'v_valid', 'ctc_valid', 'stk_valid']].all(axis='columns')
-        output_fname = output_files(args.fName, extension='.csv')
-        ds.data.to_csv(output_fname)  # dump all data
-        # combine rec for lighter output and inversion
-        ds.couple_rec(couple=args.rec_couple, keep_unpaired=args.rec_keep_unpaired)
-        # output
-        output_fname = output_files(args.fName, extension='.dat')
-        ds.to_bert(output_fname, wrt_rhoa=args.wrt_rhoa, wrt_ip=args.wrt_ip)
-        ds.report()
-        # plot
-        if args.plot:
-            ds.plot(args.fName)
+def __process__(file, args):
+    """ process ERT file """
+    
+    print('\n', '-' * 80)
+    if args.fType == 'labrecque':
+        elec, data = read_labrecque(file)
+    # pass to ERTdataset class
+    ds = ERTdataset(data=data, elec=elec)
+    # adjust
+    if args.shift_abmn is not None:
+        ds.data[['a', 'b', 'm', 'n']] += args.shift_abmn
+    if args.shift_meas is not None:
+        ds.data['meas'] += args.shift_meas
+    if args.shift_elec is not None:
+        ds.elec['num'] += args.shift_elec
+    if args.elec_coordinates is not None:
+        ds.elec = pd.read_csv(args.elec_coordinates, delim_whitespace=True)
+    # filters
+    if args.rec:
+        ds.process_rec()
+        ds.data['rec_valid'] = ds.data['rec_err'] < args.rec_max
+    if any(ds.data['ip']):
+        ds.process_rec(x='ip', x_avg='rec_ip_avg', x_err='rec_ip_err')
+    if args.ctc:
+        ds.data['ctc_valid'] = ds.data['ctc'] < args.ctc_max
+    if args.stk:
+        ds.data['stk_valid'] = ds.data['stk'] < args.stk_max
+    if args.volt:
+        ds.data['v_valid'] = ds.data['v'] > args.v_min
+    if (args.k or args.rhoa):  # get k if either k or rhoa are True
+        elec_kfile, data_kfile = read_bert(k_file=args.k_file)
+        ds.get_k(data_kfile)
+    if args.k:
+        ds.data['k_valid'] = ds.data['k'].abs() < args.k_max
+    if args.rhoa:
+        ds.data['rhoa'] = ds.data['r'] * ds.data['k']
+        ds.data['rhoa_valid'] = ds.data['rhoa'].between(args.rhoa_min, args.rhoa_max)
+    # combine filters
+    ds.data['valid'] = ds.data[['rec_valid', 'k_valid', 'rhoa_valid', 'v_valid', 'ctc_valid', 'stk_valid']].all(axis='columns')
+    output_fname = output_files(file, extension='.csv')
+    ds.data.to_csv(output_fname)  # dump all data
+    # combine rec for lighter output and inversion
+    ds.couple_rec(couple=args.rec_couple, keep_unpaired=args.rec_keep_unpaired)
+    # output
+    output_fname = output_files(file, extension='.dat')
+    ds.to_bert(output_fname, wrt_rhoa=args.wrt_rhoa, wrt_ip=args.wrt_ip, data_columns=['a', 'b', 'm', 'n', 'r'], elec_columns=['x', 'y', 'z'])
+    ds.report()
+    # plot
+    if args.plot:
+        ds.plot(file, plot_columns=['ctc', 'stk', 'v', 'rec_err', 'k', 'rhoa'], valid_column='valid')
 
 
-def main_process(**kargs):
+def process(**kargs):
+    """ process function,
+    it takes **kargs so that cmd-line arguments can be passed as funciton arguments too """
+    
     args = get_options(args_dict=kargs)
-    process(args)
+    
+    for file in args.fName:
+        __process__(file, args)
 
 if __name__ == '__main__':
-    main_process()
+    process()
